@@ -1,0 +1,6 @@
+{
+  "name": "Books and Friends",
+  "description": "A dark psychology aesthetic book club web application featuring Open Library integration, reading sessions, and persistent community discussions.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

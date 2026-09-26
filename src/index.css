@@ -1,0 +1,63 @@
+@import "tailwindcss";
+
+@layer base {
+  :root {
+    --font-cinzel: 'Cinzel', serif;
+    --font-sans: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, sans-serif;
+    --font-mono: 'JetBrains Mono', monospace;
+  }
+
+  body {
+    font-family: var(--font-sans);
+    background-color: #070709;
+    color: #e2e2e8;
+    overflow-x: hidden;
+  }
+
+  h1, h2, h3, .font-display {
+    font-family: var(--font-cinzel);
+    letter-spacing: -0.01em;
+  }
+}
+
+/* Custom Scrollbar for Dark Psychology Aesthetic */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #09090d;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #23232c;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #393946;
+}
+
+/* Atmospheric Glows & Textures */
+.glow-obscure {
+  box-shadow: 0 0 50px -10px rgba(185, 28, 28, 0.08), 0 0 80px -20px rgba(0, 0, 0, 0.9);
+}
+
+.glow-ember {
+  box-shadow: 0 0 35px -5px rgba(217, 119, 6, 0.07);
+}
+
+.hairline-border {
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+.hairline-border-hover:hover {
+  border-color: rgba(255, 255, 255, 0.16);
+}
+
+.dark-glass {
+  background: rgba(13, 13, 17, 0.85);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
