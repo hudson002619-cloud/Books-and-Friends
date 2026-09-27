@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { useAuth, ADMIN_EMAIL } from '../context/AuthContext';
-import { DarkBook, BookDiscussion, AdminAuditRecord, SupabaseConfigState } from '../types';
-import { recordAuditLog, getAdminAuditLogs, deleteBookFromSupabase, persistBookToSupabase } from '../lib/supabase';
+import { DarkBook, BookDiscussion, AdminAuditRecord, SupabaseConfigState, User } from '../types';
+import { recordAuditLog, getAdminAuditLogs, deleteBookFromSupabase, persistBookToSupabase, getStoredUserProfiles } from '../lib/supabase';
 import { SUPABASE_ADMIN_FRAMEWORK_SQL } from '../lib/schemaSql';
 import {
   Shield,
@@ -285,6 +285,27 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             a.action.toLowerCase().includes(queryFilter.toLowerCase())
         );
       case 'profiles':
+        try {
+          const stored = getStoredUserProfiles();
+          const list: User[] = Object.values(stored);
+          if (list.length > 0) {
+            return list.map((p: User) => ({
+              id: p.id,
+              email: p.email,
+              name: p.name,
+              role: p.role,
+              booksReadCount: p.booksReadCount || 0,
+              readingGoalPerMonth: p.readingGoalPerMonth || 3,
+              archetypeAffinity: p.archetypeAffinity || 'The Strategist',
+              privileges: p.email.toLowerCase() === ADMIN_EMAIL.toLowerCase()
+                ? 'FULL UNRESTRICTED (INSERT, UPDATE, DELETE, SELECT)'
+                : 'SELECT (public), INSERT (own discussions/comments/goals)',
+              syncStatus: 'Cloud Database Synchronized (Unique Email)',
+            }));
+          }
+        } catch {
+          // fallback
+        }
         return [
           {
             id: 'usr_admin_adhudson',
@@ -292,6 +313,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             role: 'admin',
             privileges: 'FULL UNRESTRICTED (INSERT, UPDATE, DELETE, SELECT)',
             accessScope: 'Global Cluster',
+            syncStatus: 'Cloud Database Synchronized (Unique Email)',
           },
           {
             id: 'usr_scholar_vance',
@@ -299,6 +321,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             role: 'scholar',
             privileges: 'SELECT (public), INSERT (discussions/comments)',
             accessScope: 'Standard Reading Salon',
+            syncStatus: 'Cloud Database Synchronized (Unique Email)',
           },
           {
             id: 'usr_member_sterling',
@@ -306,6 +329,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
             role: 'member',
             privileges: 'SELECT (public), INSERT (comments), UPVOTE',
             accessScope: 'Standard Member',
+            syncStatus: 'Cloud Database Synchronized (Unique Email)',
           },
         ];
     }

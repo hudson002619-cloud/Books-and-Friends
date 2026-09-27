@@ -1,10 +1,11 @@
 import React, { useState } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { SupabaseConfigState } from '../types';
+import { CloudSyncStatus } from '../lib/supabase';
 import { SupabaseStatusBadge } from './SupabaseStatusBadge';
 import { AuthModal } from './AuthModal';
 import { UserProfileModal } from './UserProfileModal';
-import { Shield, User, LogOut, BookOpen, Compass, Users, Sparkles, MessageSquareQuote, Camera, Edit } from 'lucide-react';
+import { Shield, LogOut, BookOpen, Compass, Users, Sparkles, RefreshCw, CheckCircle2, AlertTriangle, Cloud } from 'lucide-react';
 
 interface HeaderProps {
   activeTab: 'library' | 'explore' | 'discussions' | 'book_club' | 'admin';
@@ -14,6 +15,9 @@ interface HeaderProps {
   onConfigUpdated: (newState: SupabaseConfigState) => void;
   sessionsCount?: number;
   discussionsCount?: number;
+  cloudSyncStatus?: CloudSyncStatus;
+  isForceSyncing?: boolean;
+  onForceCloudSync?: () => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -24,11 +28,18 @@ export const Header: React.FC<HeaderProps> = ({
   onConfigUpdated,
   sessionsCount = 3,
   discussionsCount = 2,
+  cloudSyncStatus = 'synced',
+  isForceSyncing = false,
+  onForceCloudSync,
 }) => {
   const { user, isAdmin, signOut } = useAuth();
   const [authModalOpen, setAuthModalOpen] = useState(false);
   const [authModalMode, setAuthModalMode] = useState<'signin' | 'signup'>('signin');
   const [profileModalOpen, setProfileModalOpen] = useState(false);
+
+  const isCloudSynced = cloudSyncStatus === 'synced' && configState.isConnected;
+  const isDiverged = cloudSyncStatus === 'diverged';
+  const isSyncInProgress = isForceSyncing || cloudSyncStatus === 'syncing';
 
   return (
     <>
@@ -108,8 +119,79 @@ export const Header: React.FC<HeaderProps> = ({
           )}
         </nav>
 
-        {/* Zone 3: 1-2 primary actions */}
-        <div className="flex items-center gap-3">
+        {/* Zone 3: Actions & Cloud Sync Status */}
+        <div className="flex items-center gap-2 sm:gap-3">
+          {/* Cloud Sync Status Indicator - Turns Green ONLY when local state matches remote Supabase state */}
+          <div
+            className={`flex items-center gap-1.5 px-2.5 py-1 rounded-lg text-[11px] font-medium transition-all select-none border ${
+              isCloudSynced
+                ? 'bg-emerald-950/50 text-emerald-300 border-emerald-500/40 shadow-sm shadow-emerald-950/30'
+                : isSyncInProgress
+                ? 'bg-amber-950/50 text-amber-300 border-amber-500/40'
+                : isDiverged
+                ? 'bg-red-950/60 text-red-300 border-red-600/50 animate-pulse'
+                : 'bg-zinc-900/80 text-zinc-400 border-white/10'
+            }`}
+            title={
+              isCloudSynced
+                ? 'Cloud Synced: Local application state matches remote Supabase database (100% database source of truth)'
+                : isSyncInProgress
+                ? 'Reconciling and synchronizing client state with central Supabase database...'
+                : isDiverged
+                ? 'Local / Remote data divergence detected. Click Force Cloud Sync to reconcile.'
+                : 'Running in persistent client database mode'
+            }
+          >
+            {isCloudSynced ? (
+              <>
+                <span className="relative flex h-2 w-2">
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                  <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+                </span>
+                <span className="hidden sm:inline">Cloud Synced</span>
+                <span className="sm:hidden">Synced</span>
+              </>
+            ) : isSyncInProgress ? (
+              <>
+                <RefreshCw className="w-3 h-3 text-amber-400 animate-spin" />
+                <span className="hidden sm:inline">Syncing...</span>
+              </>
+            ) : isDiverged ? (
+              <>
+                <AlertTriangle className="w-3 h-3 text-red-400 shrink-0" />
+                <span className="hidden sm:inline">Divergence</span>
+                <span className="sm:hidden">Diverged</span>
+              </>
+            ) : (
+              <>
+                <Cloud className="w-3 h-3 text-zinc-400" />
+                <span className="hidden sm:inline">Local Mode</span>
+              </>
+            )}
+          </div>
+
+          {/* Manual Force Cloud Sync Button to immediately resolve divergence */}
+          {onForceCloudSync && (
+            <button
+              type="button"
+              onClick={onForceCloudSync}
+              disabled={isSyncInProgress}
+              className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-all cursor-pointer shadow-sm ${
+                isSyncInProgress
+                  ? 'bg-amber-950/40 text-amber-300 border-amber-600/40 cursor-wait opacity-80'
+                  : isDiverged
+                  ? 'bg-red-950 text-red-200 border-red-700/80 hover:bg-red-900'
+                  : 'bg-white/5 hover:bg-white/10 text-zinc-300 hover:text-zinc-100 border-white/10 hover:border-white/20'
+              }`}
+              title="Force Cloud Sync: Re-fetches all records from Supabase, purges stale local cache, and resolves state divergence."
+              aria-label="Force Cloud Sync"
+            >
+              <RefreshCw className={`w-3.5 h-3.5 ${isSyncInProgress ? 'animate-spin text-amber-300' : 'text-zinc-400'}`} />
+              <span className="hidden lg:inline">{isSyncInProgress ? 'Reconciling...' : 'Force Cloud Sync'}</span>
+              <span className="hidden sm:inline lg:hidden">{isSyncInProgress ? 'Syncing' : 'Sync'}</span>
+            </button>
+          )}
+
           {/* Supabase Status Indicator - Strictly Visible ONLY for Developer Admin */}
           {isAdmin && (
             <SupabaseStatusBadge

@@ -668,12 +668,109 @@ export async function validateSupabaseConnection(): Promise<SupabaseConfigState>
 // SUPABASE REAL PERSISTENCE & BIDIRECTIONAL SYNC ENGINE
 // =========================================================================
 
+export type CloudSyncStatus = 'synced' | 'diverged' | 'syncing' | 'offline';
+
+let currentCloudSyncStatus: CloudSyncStatus = 'synced';
+const syncListeners = new Set<(status: CloudSyncStatus) => void>();
+
+export function getCloudSyncStatus(): CloudSyncStatus {
+  return currentCloudSyncStatus;
+}
+
+export function setCloudSyncStatus(status: CloudSyncStatus) {
+  currentCloudSyncStatus = status;
+  syncListeners.forEach((listener) => {
+    try {
+      listener(status);
+    } catch {
+      // ignore
+    }
+  });
+}
+
+export function subscribeToCloudSyncStatus(callback: (status: CloudSyncStatus) => void): () => void {
+  syncListeners.add(callback);
+  callback(currentCloudSyncStatus);
+  return () => {
+    syncListeners.delete(callback);
+  };
+}
+
+// Consolidate orphaned records (reading sessions, goals, discussions) into primary identity
+export async function consolidateUserOrphanedRecords(
+  email: string,
+  userId: string,
+  name?: string,
+  avatarUrl?: string
+): Promise<void> {
+  const cleanEmail = (email || '').toLowerCase().trim();
+  if (!cleanEmail) return;
+
+  const client = getSupabaseClient();
+  if (!client) return;
+
+  try {
+    // 1. Consolidate reading sessions
+    await client
+      .from('reading_sessions')
+      .update({
+        host_id: userId,
+        ...(name ? { hosted_by: name } : {}),
+        ...(avatarUrl ? { host_avatar: avatarUrl } : {}),
+      })
+      .ilike('host_email', cleanEmail);
+
+    // 2. Consolidate member goals
+    await client
+      .from('member_goals')
+      .update({
+        ...(name ? { user_name: name } : {}),
+        ...(avatarUrl ? { user_avatar: avatarUrl } : {}),
+      })
+      .ilike('user_email', cleanEmail);
+
+    // 3. Consolidate book discussions
+    await client
+      .from('discussions')
+      .update({
+        ...(name ? { author_name: name } : {}),
+        ...(avatarUrl ? { author_avatar: avatarUrl } : {}),
+      })
+      .ilike('author_email', cleanEmail);
+
+    // 4. Consolidate book club discussions
+    await client
+      .from('book_club_discussions')
+      .update({
+        author_id: userId,
+        ...(name ? { author_name: name } : {}),
+        ...(avatarUrl ? { author_avatar: avatarUrl } : {}),
+      })
+      .ilike('author_email', cleanEmail);
+
+    // 5. Consolidate book club comments
+    await client
+      .from('book_club_comments')
+      .update({
+        author_id: userId,
+        ...(name ? { author_name: name } : {}),
+        ...(avatarUrl ? { author_avatar: avatarUrl } : {}),
+      })
+      .ilike('author_email', cleanEmail);
+  } catch (err) {
+    console.warn('[Supabase] Client-side orphan consolidation note:', err);
+  }
+}
+
 // Books Persistence
 export async function syncBooksFromSupabase(): Promise<DarkBook[]> {
   const local = getLocalBooks();
   const deletedKeys = getDeletedBookKeys();
   const client = getSupabaseClient();
-  if (!client) return local;
+  if (!client) {
+    setCloudSyncStatus('offline');
+    return local;
+  }
 
   try {
     const { data, error } = await client
@@ -683,6 +780,7 @@ export async function syncBooksFromSupabase(): Promise<DarkBook[]> {
 
     if (error) {
       console.warn('[Supabase] Failed to sync books from remote cluster:', error);
+      setCloudSyncStatus('diverged');
       return local;
     }
 
@@ -720,9 +818,7 @@ export async function syncBooksFromSupabase(): Promise<DarkBook[]> {
         status: row.status || 'reading',
       };
 
-      // If this book was marked deleted by Developer Admin, do NOT resurrect it!
       if (isBookDeleted(mapped, deletedKeys)) {
-        // Proactively clean up remote table in background
         if (row.id) client.from('books').delete().eq('id', row.id).then();
         if (row.open_library_key) client.from('books').delete().eq('open_library_key', row.open_library_key).then();
       } else {
@@ -730,34 +826,14 @@ export async function syncBooksFromSupabase(): Promise<DarkBook[]> {
       }
     }
 
-    // Merge remote and local books: Local edits take precedence over stale remote records
-    const bookMap = new Map<string, DarkBook>();
-
-    // 1. Add non-deleted remote books
-    remoteBooks.forEach((rb) => {
-      const key = (rb.openLibraryKey || rb.id).toLowerCase();
-      bookMap.set(key, rb);
-    });
-
-    // 2. Overlay local books (retaining local updates & new books)
-    local.forEach((lb) => {
-      if (!isBookDeleted(lb, deletedKeys)) {
-        const key = (lb.openLibraryKey || lb.id).toLowerCase();
-        const existing = bookMap.get(key);
-        if (existing) {
-          bookMap.set(key, { ...existing, ...lb });
-        } else {
-          bookMap.set(key, lb);
-          persistBookToSupabase(lb).catch(() => {});
-        }
-      }
-    });
-
-    const finalBooks = Array.from(bookMap.values()).filter((b) => !isBookDeleted(b, deletedKeys));
-    saveLocalBooks(finalBooks);
-    return finalBooks;
+    // Clear stale local storage keys and strictly adopt the Supabase database as source of truth
+    localStorage.removeItem(LOCAL_BOOKS_KEY);
+    saveLocalBooks(remoteBooks);
+    setCloudSyncStatus('synced');
+    return remoteBooks;
   } catch (err) {
     console.warn('[Supabase] Failed to sync books from remote cluster, using local cache:', err);
+    setCloudSyncStatus('diverged');
     return local;
   }
 }
@@ -887,7 +963,10 @@ export async function deleteDiscussionFromSupabase(discussionId: string): Promis
 export async function syncDiscussionsFromSupabase(): Promise<BookDiscussion[]> {
   const local = getLocalDiscussions();
   const client = getSupabaseClient();
-  if (!client) return local;
+  if (!client) {
+    setCloudSyncStatus('offline');
+    return local;
+  }
 
   try {
     const { data: discussionsData, error: discErr } = await client
@@ -895,7 +974,13 @@ export async function syncDiscussionsFromSupabase(): Promise<BookDiscussion[]> {
       .select('*, comments(*)')
       .order('created_at', { ascending: false });
 
-    if (discErr || !discussionsData || discussionsData.length === 0) {
+    if (discErr) {
+      console.warn('[Supabase] Failed to sync discussions:', discErr);
+      setCloudSyncStatus('diverged');
+      return local;
+    }
+
+    if (!discussionsData || discussionsData.length === 0) {
       return local;
     }
 
@@ -928,20 +1013,14 @@ export async function syncDiscussionsFromSupabase(): Promise<BookDiscussion[]> {
       })),
     }));
 
-    // Merge with local discussions
-    const discMap = new Map<string, BookDiscussion>();
-    mapped.forEach((d) => discMap.set(d.id, d));
-    local.forEach((d) => {
-      if (!discMap.has(d.id)) {
-        discMap.set(d.id, d);
-      }
-    });
-
-    const merged = Array.from(discMap.values());
-    saveLocalDiscussions(merged);
-    return merged;
+    // Clear stale local storage and store strictly remote database rows
+    localStorage.removeItem(LOCAL_DISCUSSIONS_KEY);
+    saveLocalDiscussions(mapped);
+    setCloudSyncStatus('synced');
+    return mapped;
   } catch (err) {
     console.warn('[Supabase] Failed to sync discussions, using local cache:', err);
+    setCloudSyncStatus('diverged');
     return local;
   }
 }
@@ -993,7 +1072,10 @@ export async function persistCommentToSupabase(comment: DiscussionComment): Prom
 export async function syncSessionsFromSupabase(): Promise<ReadingSession[]> {
   const local = getLocalReadingSessions();
   const client = getSupabaseClient();
-  if (!client) return local;
+  if (!client) {
+    setCloudSyncStatus('offline');
+    return local;
+  }
 
   try {
     const { data, error } = await client
@@ -1001,7 +1083,13 @@ export async function syncSessionsFromSupabase(): Promise<ReadingSession[]> {
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (error || !data || data.length === 0) {
+    if (error) {
+      console.warn('[Supabase] Failed to sync sessions:', error);
+      setCloudSyncStatus('diverged');
+      return local;
+    }
+
+    if (!data || data.length === 0) {
       return local;
     }
 
@@ -1031,19 +1119,14 @@ export async function syncSessionsFromSupabase(): Promise<ReadingSession[]> {
       lastActivityAt: s.last_activity_at || s.created_at,
     }));
 
-    const sessMap = new Map<string, ReadingSession>();
-    mapped.forEach((s) => sessMap.set(s.id, s));
-    local.forEach((s) => {
-      if (!sessMap.has(s.id)) {
-        sessMap.set(s.id, s);
-      }
-    });
-
-    const merged = Array.from(sessMap.values());
-    saveLocalReadingSessions(merged);
-    return merged;
+    // Clear stale local storage and store strictly remote database rows
+    localStorage.removeItem(LOCAL_SESSIONS_KEY);
+    saveLocalReadingSessions(mapped);
+    setCloudSyncStatus('synced');
+    return mapped;
   } catch (err) {
     console.warn('[Supabase] Failed to sync sessions, using local cache:', err);
+    setCloudSyncStatus('diverged');
     return local;
   }
 }
@@ -1100,31 +1183,187 @@ export async function deleteSessionFromSupabase(sessionId: string): Promise<{ su
   }
 }
 
-// User Profiles Persistence & Photo Storage
-export async function persistUserProfileToSupabase(user: User): Promise<void> {
-  // Update local profiles cache
+// User Profiles Cloud Database Engine & Multi-Device Sync
+export function mapProfileRowToUser(row: any): User {
+  const email = (row.email || '').toLowerCase().trim();
+  const isAdminEmail = email === 'adhudson504@gmail.com';
+  
+  return {
+    id: row.id || `usr_${email.replace(/[^a-z0-9]/gi, '_')}`,
+    email,
+    name: row.name || email.split('@')[0] || 'Sanctuary Scholar',
+    role: isAdminEmail ? 'admin' : (row.role === 'admin' ? 'member' : (row.role || 'member')),
+    avatarUrl: row.avatar_url || (isAdminEmail ? '/src/assets/images/profile_avatar_scholar_1790432624462.jpg' : undefined),
+    bio: row.bio || (isAdminEmail ? 'Lead Architect & Developer Administrator of Books and Friends.' : 'Books and Friends reader & participant.'),
+    archetypeAffinity: row.archetype_affinity || (isAdminEmail ? 'The Sovereign' : 'The Strategist'),
+    favoriteBook: row.favorite_book || (isAdminEmail ? 'The 48 Laws of Power' : ''),
+    readingGoalPerMonth: Number(row.reading_goal_per_month) || 3,
+    booksReadCount: Number(row.books_read_count) || (isAdminEmail ? 48 : 0),
+    createdAt: row.created_at || new Date().toISOString(),
+  };
+}
+
+export async function fetchUserProfileByEmail(email: string): Promise<User | null> {
+  const cleanEmail = email.toLowerCase().trim();
+  if (!cleanEmail) return null;
+
+  const client = getSupabaseClient();
+  if (client) {
+    try {
+      const { data, error } = await client
+        .from('profiles')
+        .select('*')
+        .ilike('email', cleanEmail)
+        .maybeSingle();
+
+      if (!error && data) {
+        const user = mapProfileRowToUser(data);
+        // Cache to local storage as secondary backup
+        const profiles = getStoredUserProfiles();
+        profiles[cleanEmail] = user;
+        localStorage.setItem(LOCAL_USER_PROFILES_KEY, JSON.stringify(profiles));
+        return user;
+      }
+    } catch (err) {
+      console.warn('[Supabase] Failed to fetch profile from cloud database:', err);
+    }
+  }
+
+  // Fallback to local cache if offline
   const profiles = getStoredUserProfiles();
-  profiles[user.email.toLowerCase()] = user;
+  return profiles[cleanEmail] || null;
+}
+
+export async function fetchAllProfilesFromSupabase(): Promise<Record<string, User>> {
+  const client = getSupabaseClient();
+  const localProfiles = getStoredUserProfiles();
+  if (!client) return localProfiles;
+
+  try {
+    const { data, error } = await client
+      .from('profiles')
+      .select('*')
+      .order('created_at', { ascending: false });
+
+    if (!error && data && data.length > 0) {
+      const mergedMap: Record<string, User> = { ...localProfiles };
+      for (const row of data) {
+        if (row.email) {
+          const u = mapProfileRowToUser(row);
+          mergedMap[u.email.toLowerCase()] = u;
+        }
+      }
+      localStorage.setItem(LOCAL_USER_PROFILES_KEY, JSON.stringify(mergedMap));
+      return mergedMap;
+    }
+  } catch (err) {
+    console.warn('[Supabase] Failed to fetch all profiles:', err);
+  }
+
+  return localProfiles;
+}
+
+export async function persistUserProfileToSupabase(user: User): Promise<User> {
+  const cleanEmail = user.email.toLowerCase().trim();
+  const isAdminEmail = cleanEmail === 'adhudson504@gmail.com';
+
+  // Optimistically cache locally
+  const profiles = getStoredUserProfiles();
+  const resolvedRole = isAdminEmail ? 'admin' : (user.role === 'admin' ? 'member' : user.role);
+  const userToSave: User = {
+    ...user,
+    email: cleanEmail,
+    role: resolvedRole,
+  };
+  profiles[cleanEmail] = userToSave;
   localStorage.setItem(LOCAL_USER_PROFILES_KEY, JSON.stringify(profiles));
 
   const client = getSupabaseClient();
-  if (!client) return;
+  if (!client) return userToSave;
 
   try {
-    await client.from('profiles').upsert({
-      email: user.email.toLowerCase(),
-      name: user.name,
-      role: user.role,
-      avatar_url: user.avatarUrl,
-      bio: user.bio,
-      archetype_affinity: user.archetypeAffinity,
-      favorite_book: user.favoriteBook,
-      reading_goal_per_month: user.readingGoalPerMonth,
-      books_read_count: user.booksReadCount,
+    const payload: any = {
+      email: cleanEmail,
+      name: userToSave.name,
+      role: userToSave.role,
+      avatar_url: userToSave.avatarUrl || null,
+      bio: userToSave.bio || '',
+      archetype_affinity: userToSave.archetypeAffinity || 'The Strategist',
+      favorite_book: userToSave.favoriteBook || '',
+      reading_goal_per_month: Number(userToSave.readingGoalPerMonth) || 3,
+      books_read_count: Number(userToSave.booksReadCount) || 0,
       updated_at: new Date().toISOString(),
-    }, { onConflict: 'email' });
+    };
+
+    // If ID is a valid UUID, include it in payload
+    if (userToSave.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(userToSave.id)) {
+      payload.id = userToSave.id;
+    }
+
+    const { data, error } = await client
+      .from('profiles')
+      .upsert(payload, { onConflict: 'email' })
+      .select('*')
+      .maybeSingle();
+
+    if (error) {
+      console.warn('[Supabase] Persist profile warning:', error);
+      return userToSave;
+    }
+
+    if (data) {
+      const canonicalUser = mapProfileRowToUser(data);
+      profiles[cleanEmail] = canonicalUser;
+      localStorage.setItem(LOCAL_USER_PROFILES_KEY, JSON.stringify(profiles));
+      return canonicalUser;
+    }
   } catch (err) {
-    console.warn('[Supabase] Persist profile error:', err);
+    console.warn('[Supabase] Persist profile exception (safely cached):', err);
+  }
+
+  return userToSave;
+}
+
+export function subscribeToUserProfile(email: string, onUpdate: (user: User) => void): () => void {
+  const client = getSupabaseClient();
+  const cleanEmail = email.toLowerCase().trim();
+  if (!client || !cleanEmail) return () => {};
+
+  try {
+    const channelName = `profile_live_${cleanEmail.replace(/[^a-z0-9]/g, '_')}_${Date.now()}`;
+    const channel = client
+      .channel(channelName)
+      .on(
+        'postgres_changes',
+        {
+          event: '*',
+          schema: 'public',
+          table: 'profiles',
+          filter: `email=eq.${cleanEmail}`,
+        },
+        (payload: any) => {
+          if (payload.new && payload.new.email) {
+            const updatedUser = mapProfileRowToUser(payload.new);
+            // Update local storage cache
+            const profiles = getStoredUserProfiles();
+            profiles[cleanEmail] = updatedUser;
+            localStorage.setItem(LOCAL_USER_PROFILES_KEY, JSON.stringify(profiles));
+            onUpdate(updatedUser);
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      try {
+        client.removeChannel(channel);
+      } catch {
+        // ignore
+      }
+    };
+  } catch (e) {
+    console.warn('[Supabase] Realtime profile subscription error:', e);
+    return () => {};
   }
 }
 
@@ -1286,7 +1525,10 @@ export function saveStoredVaultFilters(filters: VaultFilterState) {
 export async function syncBookClubThreadsFromSupabase(): Promise<BookClubThread[]> {
   const local = getLocalBookClubThreads();
   const client = getSupabaseClient();
-  if (!client) return local;
+  if (!client) {
+    setCloudSyncStatus('offline');
+    return local;
+  }
 
   try {
     const { data, error } = await client
@@ -1295,7 +1537,13 @@ export async function syncBookClubThreadsFromSupabase(): Promise<BookClubThread[
       .order('pinned', { ascending: false })
       .order('created_at', { ascending: false });
 
-    if (error || !data || data.length === 0) {
+    if (error) {
+      console.warn('[Supabase] Failed to sync book club threads:', error);
+      setCloudSyncStatus('diverged');
+      return local;
+    }
+
+    if (!data || data.length === 0) {
       return local;
     }
 
@@ -1336,20 +1584,14 @@ export async function syncBookClubThreadsFromSupabase(): Promise<BookClubThread[
       })),
     }));
 
-    // Merge with local threads
-    const threadMap = new Map<string, BookClubThread>();
-    mapped.forEach((t) => threadMap.set(t.id, t));
-    local.forEach((t) => {
-      if (!threadMap.has(t.id)) {
-        threadMap.set(t.id, t);
-      }
-    });
-
-    const merged = Array.from(threadMap.values());
-    saveLocalBookClubThreads(merged);
-    return merged;
+    // Clear stale local storage and store strictly remote database rows
+    localStorage.removeItem(LOCAL_BOOK_CLUB_THREADS_KEY);
+    saveLocalBookClubThreads(mapped);
+    setCloudSyncStatus('synced');
+    return mapped;
   } catch (err) {
     console.warn('[Supabase] Failed to sync book club threads from remote cluster:', err);
+    setCloudSyncStatus('diverged');
     return local;
   }
 }
@@ -1421,7 +1663,10 @@ export async function deleteBookClubThreadFromSupabase(threadId: string): Promis
 export async function syncMemberGoalsFromSupabase(): Promise<MemberGoal[]> {
   const local = getLocalMemberGoals();
   const client = getSupabaseClient();
-  if (!client) return local;
+  if (!client) {
+    setCloudSyncStatus('offline');
+    return local;
+  }
 
   try {
     const { data, error } = await client
@@ -1429,7 +1674,13 @@ export async function syncMemberGoalsFromSupabase(): Promise<MemberGoal[]> {
       .select('*')
       .order('created_at', { ascending: false });
 
-    if (error || !data || data.length === 0) {
+    if (error) {
+      console.warn('[Supabase] Failed to sync member goals:', error);
+      setCloudSyncStatus('diverged');
+      return local;
+    }
+
+    if (!data || data.length === 0) {
       return local;
     }
 
@@ -1447,20 +1698,62 @@ export async function syncMemberGoalsFromSupabase(): Promise<MemberGoal[]> {
       createdAt: row.created_at || new Date().toISOString(),
     }));
 
-    const goalMap = new Map<string, MemberGoal>();
-    mapped.forEach((g) => goalMap.set(g.id, g));
-    local.forEach((g) => {
-      if (!goalMap.has(g.id)) {
-        goalMap.set(g.id, g);
-      }
-    });
-
-    const merged = Array.from(goalMap.values());
-    saveLocalMemberGoals(merged);
-    return merged;
+    // Clear stale local storage and store strictly remote database rows
+    localStorage.removeItem(LOCAL_MEMBER_GOALS_KEY);
+    saveLocalMemberGoals(mapped);
+    setCloudSyncStatus('synced');
+    return mapped;
   } catch (err) {
     console.warn('[Supabase] Failed to sync member goals:', err);
+    setCloudSyncStatus('diverged');
     return local;
+  }
+}
+
+// Master Force Cloud Sync to resolve all local/remote divergence and re-seed single source of truth
+export async function forceCloudSyncAll(): Promise<{
+  success: boolean;
+  books: DarkBook[];
+  discussions: BookDiscussion[];
+  sessions: ReadingSession[];
+  threads: BookClubThread[];
+  goals: MemberGoal[];
+  profiles: Record<string, User>;
+}> {
+  setCloudSyncStatus('syncing');
+
+  try {
+    const [books, discussions, sessions, threads, goals, profiles] = await Promise.all([
+      syncBooksFromSupabase(),
+      syncDiscussionsFromSupabase(),
+      syncSessionsFromSupabase(),
+      syncBookClubThreadsFromSupabase(),
+      syncMemberGoalsFromSupabase(),
+      fetchAllProfilesFromSupabase(),
+    ]);
+
+    setCloudSyncStatus('synced');
+    return {
+      success: true,
+      books,
+      discussions,
+      sessions,
+      threads,
+      goals,
+      profiles,
+    };
+  } catch (e) {
+    console.error('[Supabase] Force cloud sync failed:', e);
+    setCloudSyncStatus('diverged');
+    return {
+      success: false,
+      books: getLocalBooks(),
+      discussions: getLocalDiscussions(),
+      sessions: getLocalReadingSessions(),
+      threads: getLocalBookClubThreads(),
+      goals: getLocalMemberGoals(),
+      profiles: getStoredUserProfiles(),
+    };
   }
 }
 

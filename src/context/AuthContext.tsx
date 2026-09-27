@@ -1,6 +1,17 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useRef } from 'react';
 import { User, UserRole } from '../types';
-import { recordAuditLog, persistUserProfileToSupabase, getStoredUserProfiles } from '../lib/supabase';
+import {
+  recordAuditLog,
+  persistUserProfileToSupabase,
+  fetchUserProfileByEmail,
+  subscribeToUserProfile,
+  consolidateUserOrphanedRecords,
+  syncMemberGoalsFromSupabase,
+  syncSessionsFromSupabase,
+  syncBookClubThreadsFromSupabase,
+  syncDiscussionsFromSupabase,
+  getStoredUserProfiles,
+} from '../lib/supabase';
 
 export const ADMIN_EMAIL = 'adhudson504@gmail.com';
 export const ADMIN_PASSWORD = 'mYZuMr4W1hjEqE0q';
@@ -10,11 +21,13 @@ interface AuthContextType {
   user: User | null;
   isAdmin: boolean;
   isLoading: boolean;
-  signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string }>;
-  signUp: (email: string, password: string, name: string) => Promise<{ success: boolean; error?: string }>;
+  signIn: (email: string, password: string) => Promise<{ success: boolean; error?: string; isExistingUser?: boolean }>;
+  signUp: (email: string, password: string, name: string) => Promise<{ success: boolean; error?: string; isExistingUser?: boolean }>;
   signOut: () => void;
   switchDemoRole: (role: UserRole | 'guest') => void;
   updateProfile: (updatedData: Partial<User>) => Promise<void>;
+  refreshProfileFromCloud: () => Promise<User | null>;
+  refetchUserData: () => Promise<void>;
 }
 
 const AuthContext = createContext<AuthContextType | undefined>(undefined);
@@ -54,30 +67,110 @@ export const SEED_USERS: Record<string, User> = {
 export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [user, setUser] = useState<User | null>(null);
   const [isLoading, setIsLoading] = useState(true);
+  const realtimeUnsubRef = useRef<(() => void) | null>(null);
 
-  useEffect(() => {
+  // Trigger re-fetch of all user-specific data from Supabase
+  const refetchUserData = async () => {
     try {
-      const stored = localStorage.getItem(AUTH_STORAGE_KEY);
-      if (stored) {
-        const parsed = JSON.parse(stored);
-        // Strict runtime re-verification of developer admin role
-        if (parsed.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
-          parsed.role = 'admin';
-        } else if (parsed.role === 'admin') {
-          // Demote any spoofed or non-admin accounts trying to claim admin role
-          parsed.role = 'member';
-        }
-        setUser(parsed);
-      } else {
-        // Initial visitor state: No active session (Must login/signup first)
-        setUser(null);
-      }
-    } catch {
-      setUser(null);
-    } finally {
-      setIsLoading(false);
+      await Promise.all([
+        syncMemberGoalsFromSupabase(),
+        syncSessionsFromSupabase(),
+        syncBookClubThreadsFromSupabase(),
+        syncDiscussionsFromSupabase(),
+      ]);
+      window.dispatchEvent(new CustomEvent('books-and-friends:auth-sync'));
+    } catch (e) {
+      console.warn('[Auth] Re-fetching user-specific data note:', e);
     }
+  };
+
+  // Background Cloud Sync & Profile Refresh
+  const syncWithCloudProfile = async (targetEmail: string) => {
+    const cleanEmail = targetEmail.trim().toLowerCase();
+    if (!cleanEmail) return null;
+
+    try {
+      const cloudProfile = await fetchUserProfileByEmail(cleanEmail);
+      if (cloudProfile) {
+        setUser((prev) => {
+          if (!prev || prev.email.toLowerCase() === cleanEmail) {
+            const merged = { ...prev, ...cloudProfile };
+            if (cleanEmail === ADMIN_EMAIL.toLowerCase()) {
+              merged.role = 'admin';
+            }
+            localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(merged));
+            return merged;
+          }
+          return prev;
+        });
+        return cloudProfile;
+      }
+    } catch (e) {
+      console.warn('[Auth] Background cloud profile sync error:', e);
+    }
+    return null;
+  };
+
+  // Initial session hydration + cloud database re-sync
+  useEffect(() => {
+    async function initSession() {
+      try {
+        const stored = localStorage.getItem(AUTH_STORAGE_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (parsed.email?.toLowerCase() === ADMIN_EMAIL.toLowerCase()) {
+            parsed.role = 'admin';
+          } else if (parsed.role === 'admin') {
+            parsed.role = 'member';
+          }
+          setUser(parsed);
+
+          // Fetch latest profile and user-specific data
+          syncWithCloudProfile(parsed.email);
+          refetchUserData();
+        } else {
+          setUser(null);
+        }
+      } catch {
+        setUser(null);
+      } finally {
+        setIsLoading(false);
+      }
+    }
+
+    initSession();
   }, []);
+
+  // Real-time listener for profile changes across devices (Phone <-> Laptop)
+  useEffect(() => {
+    if (realtimeUnsubRef.current) {
+      realtimeUnsubRef.current();
+      realtimeUnsubRef.current = null;
+    }
+
+    if (user?.email) {
+      const cleanEmail = user.email.toLowerCase().trim();
+      realtimeUnsubRef.current = subscribeToUserProfile(cleanEmail, (cloudUser) => {
+        setUser((currentUser) => {
+          if (!currentUser) return cloudUser;
+          const merged: User = {
+            ...currentUser,
+            ...cloudUser,
+            role: cleanEmail === ADMIN_EMAIL.toLowerCase() ? 'admin' : (cloudUser.role || 'member'),
+          };
+          localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(merged));
+          return merged;
+        });
+      });
+    }
+
+    return () => {
+      if (realtimeUnsubRef.current) {
+        realtimeUnsubRef.current();
+        realtimeUnsubRef.current = null;
+      }
+    };
+  }, [user?.email]);
 
   const isAdmin = Boolean(
     user &&
@@ -85,7 +178,13 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     user.role === 'admin'
   );
 
-  const signIn = async (email: string, password: string): Promise<{ success: boolean; error?: string }> => {
+  const refreshProfileFromCloud = async (): Promise<User | null> => {
+    if (!user?.email) return null;
+    return await syncWithCloudProfile(user.email);
+  };
+
+  // Sign In with cloud database unique profile resolution
+  const signIn = async (email: string, password: string): Promise<{ success: boolean; error?: string; isExistingUser?: boolean }> => {
     const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = password.trim();
 
@@ -96,9 +195,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       return { success: false, error: 'Please enter your password.' };
     }
 
+    // 1. Fetch user from Central Cloud Database (Supabase `profiles` table)
+    let cloudProfile = await fetchUserProfileByEmail(cleanEmail);
+    const isExistingUser = Boolean(cloudProfile);
+
     let authenticatedUser: User;
-    const storedProfiles = getStoredUserProfiles();
-    const existingProfile = storedProfiles[cleanEmail];
 
     // Strict Developer Admin Security Enforcement
     if (cleanEmail === ADMIN_EMAIL.toLowerCase()) {
@@ -111,58 +212,76 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       authenticatedUser = {
         ...SEED_USERS.admin,
-        ...(existingProfile || {}),
+        ...(cloudProfile || {}),
         email: ADMIN_EMAIL,
         role: 'admin',
       };
 
       recordAuditLog({
         action: 'SELECT',
-        table: 'auth.users',
+        table: 'public.profiles',
         performedBy: ADMIN_EMAIL,
-        details: 'Developer Admin signed in with verified credentials (Email: adhudson504@gmail.com). Full database privileges granted.',
+        details: 'Developer Admin signed in with verified credentials (adhudson504@gmail.com). Full database privileges granted.',
         status: 'SUCCESS',
       });
     } else {
-      // Regular User Sign In (Strict Privacy - Regular User has NO Admin Access)
+      // Regular User Sign In
       if (cleanPassword.length < 6) {
         return { success: false, error: 'Password must be at least 6 characters long.' };
       }
 
-      authenticatedUser = existingProfile ? {
-        ...existingProfile,
-        email: cleanEmail,
-        role: 'member',
-      } : {
-        id: `usr_${Date.now()}`,
-        email: cleanEmail,
-        name: cleanEmail.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase()),
-        role: 'member',
-        createdAt: new Date().toISOString(),
-        bio: 'Dark Psychology explorer & Books and Friends participant',
-        booksReadCount: 0,
-      };
+      if (cloudProfile) {
+        // User already exists in cloud database: Map directly to original User ID and profile data!
+        authenticatedUser = {
+          ...cloudProfile,
+          email: cleanEmail,
+          role: 'member',
+        };
+      } else {
+        // First-time sign-in: Generate consistent canonical user record
+        authenticatedUser = {
+          id: `usr_${cleanEmail.replace(/[^a-z0-9]/gi, '_')}`,
+          email: cleanEmail,
+          name: cleanEmail.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase()),
+          role: 'member',
+          createdAt: new Date().toISOString(),
+          bio: 'Dark Psychology explorer & Books and Friends participant',
+          booksReadCount: 0,
+        };
+      }
 
       recordAuditLog({
         action: 'SELECT',
-        table: 'auth.users',
+        table: 'public.profiles',
         performedBy: cleanEmail,
-        details: `Regular user signed in: ${cleanEmail} (Role: member). Admin controls restricted.`,
+        details: `User authenticated: ${cleanEmail} (ID: ${authenticatedUser.id}, Role: member). Synchronized with cloud database.`,
         status: 'SUCCESS',
       });
     }
 
-    setUser(authenticatedUser);
-    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authenticatedUser));
-    await persistUserProfileToSupabase(authenticatedUser);
-    return { success: true };
+    // Save active session & persist canonical cloud profile
+    const canonicalUser = await persistUserProfileToSupabase(authenticatedUser);
+    setUser(canonicalUser);
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(canonicalUser));
+
+    // Consolidate any orphaned records and re-fetch user-specific data immediately
+    consolidateUserOrphanedRecords(
+      canonicalUser.email,
+      canonicalUser.id,
+      canonicalUser.name,
+      canonicalUser.avatarUrl
+    );
+    await refetchUserData();
+
+    return { success: true, isExistingUser };
   };
 
+  // Sign Up with unique email constraint check and existing account mapping
   const signUp = async (
     email: string,
     password: string,
     name: string
-  ): Promise<{ success: boolean; error?: string }> => {
+  ): Promise<{ success: boolean; error?: string; isExistingUser?: boolean }> => {
     const cleanEmail = email.trim().toLowerCase();
     const cleanPassword = password.trim();
     const cleanName = name.trim();
@@ -184,35 +303,77 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       };
     }
 
-    const newUser: User = {
-      id: isTargetAdmin ? SEED_USERS.admin.id : `usr_${Date.now()}`,
-      email: cleanEmail,
-      name: cleanName || (isTargetAdmin ? 'A. D. Hudson (Developer Admin)' : 'Sanctuary Scholar'),
-      role: isTargetAdmin ? 'admin' : 'member',
-      createdAt: new Date().toISOString(),
-      bio: isTargetAdmin
-        ? 'Lead Architect and Developer Administrator of Books and Friends'
-        : 'Initiated reader in Books and Friends Dark Psychology Sanctuary',
-      booksReadCount: 0,
-      avatarUrl: isTargetAdmin ? '/src/assets/images/profile_avatar_scholar_1790432624462.jpg' : undefined,
-    };
+    // Check if the email already exists in the central cloud database
+    const existingCloudProfile = await fetchUserProfileByEmail(cleanEmail);
 
-    setUser(newUser);
-    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(newUser));
+    let targetUser: User;
+    let isExisting = false;
 
-    recordAuditLog({
-      action: 'INSERT',
-      table: 'public.profiles',
-      performedBy: cleanEmail,
-      details: `New account registered: ${cleanEmail} (Assigned role: ${newUser.role})`,
-      status: 'SUCCESS',
-    });
+    if (existingCloudProfile) {
+      // The email already exists in the database!
+      // Authenticate against the existing record and map them to their original User ID and profile data.
+      isExisting = true;
+      targetUser = {
+        ...existingCloudProfile,
+        email: cleanEmail,
+        name: cleanName || existingCloudProfile.name,
+        role: isTargetAdmin ? 'admin' : (existingCloudProfile.role === 'admin' ? 'member' : existingCloudProfile.role),
+      };
 
-    return { success: true };
+      recordAuditLog({
+        action: 'SELECT',
+        table: 'public.profiles',
+        performedBy: cleanEmail,
+        details: `Existing account mapped to original User ID [${targetUser.id}] for email: ${cleanEmail}. Re-linked to central cloud profile.`,
+        status: 'SUCCESS',
+      });
+    } else {
+      // Brand new user: Create new profile
+      targetUser = {
+        id: isTargetAdmin ? SEED_USERS.admin.id : `usr_${cleanEmail.replace(/[^a-z0-9]/gi, '_')}`,
+        email: cleanEmail,
+        name: cleanName || (isTargetAdmin ? 'A. D. Hudson (Developer Admin)' : 'Sanctuary Scholar'),
+        role: isTargetAdmin ? 'admin' : 'member',
+        createdAt: new Date().toISOString(),
+        bio: isTargetAdmin
+          ? 'Lead Architect and Developer Administrator of Books and Friends'
+          : 'Initiated reader in Books and Friends Dark Psychology Sanctuary',
+        booksReadCount: 0,
+        avatarUrl: isTargetAdmin ? '/src/assets/images/profile_avatar_scholar_1790432624462.jpg' : undefined,
+      };
+
+      recordAuditLog({
+        action: 'INSERT',
+        table: 'public.profiles',
+        performedBy: cleanEmail,
+        details: `New account registered in cloud database: ${cleanEmail} (Role: ${targetUser.role}, ID: ${targetUser.id})`,
+        status: 'SUCCESS',
+      });
+    }
+
+    // Save directly to the cloud database and get canonical record
+    const canonicalUser = await persistUserProfileToSupabase(targetUser);
+    setUser(canonicalUser);
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(canonicalUser));
+
+    // Consolidate any orphaned records and re-fetch user-specific data immediately
+    consolidateUserOrphanedRecords(
+      canonicalUser.email,
+      canonicalUser.id,
+      canonicalUser.name,
+      canonicalUser.avatarUrl
+    );
+    await refetchUserData();
+
+    return { success: true, isExistingUser: isExisting };
   };
 
   const signOut = () => {
     const previousEmail = user?.email || 'unknown';
+    if (realtimeUnsubRef.current) {
+      realtimeUnsubRef.current();
+      realtimeUnsubRef.current = null;
+    }
     setUser(null);
     localStorage.removeItem(AUTH_STORAGE_KEY);
 
@@ -225,16 +386,25 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     });
   };
 
-  const switchDemoRole = (role: UserRole | 'guest') => {
+  const switchDemoRole = async (role: UserRole | 'guest') => {
     if (role === 'admin') {
-      setUser(SEED_USERS.admin);
-      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(SEED_USERS.admin));
+      const canonical = await persistUserProfileToSupabase(SEED_USERS.admin);
+      setUser(canonical);
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(canonical));
+      consolidateUserOrphanedRecords(canonical.email, canonical.id, canonical.name, canonical.avatarUrl);
+      refetchUserData();
     } else if (role === 'scholar') {
-      setUser(SEED_USERS.scholar);
-      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(SEED_USERS.scholar));
+      const canonical = await persistUserProfileToSupabase(SEED_USERS.scholar);
+      setUser(canonical);
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(canonical));
+      consolidateUserOrphanedRecords(canonical.email, canonical.id, canonical.name, canonical.avatarUrl);
+      refetchUserData();
     } else if (role === 'member') {
-      setUser(SEED_USERS.member);
-      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(SEED_USERS.member));
+      const canonical = await persistUserProfileToSupabase(SEED_USERS.member);
+      setUser(canonical);
+      localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(canonical));
+      consolidateUserOrphanedRecords(canonical.email, canonical.id, canonical.name, canonical.avatarUrl);
+      refetchUserData();
     } else {
       setUser(null);
       localStorage.removeItem(AUTH_STORAGE_KEY);
@@ -251,23 +421,43 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       role: user.email.toLowerCase() === ADMIN_EMAIL.toLowerCase() ? 'admin' : (updatedData.role || user.role),
     };
 
-    setUser(merged);
-    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(merged));
+    // Save directly to the central cloud database (Supabase `profiles` table)
+    const canonicalUser = await persistUserProfileToSupabase(merged);
+    setUser(canonicalUser);
+    localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(canonicalUser));
 
-    // Persist to Supabase profiles & local cache
-    await persistUserProfileToSupabase(merged);
+    // Consolidate user records across app
+    consolidateUserOrphanedRecords(
+      canonicalUser.email,
+      canonicalUser.id,
+      canonicalUser.name,
+      canonicalUser.avatarUrl
+    );
 
     recordAuditLog({
       action: 'UPDATE',
       table: 'public.profiles',
       performedBy: user.email,
-      details: `Profile updated: ${merged.name} (${user.email}). Avatar / Bio / Affinity synchronized.`,
+      details: `Profile updated in central cloud database: ${canonicalUser.name} (${user.email}). Synced across devices.`,
       status: 'SUCCESS',
     });
   };
 
   return (
-    <AuthContext.Provider value={{ user, isAdmin, isLoading, signIn, signUp, signOut, switchDemoRole, updateProfile }}>
+    <AuthContext.Provider
+      value={{
+        user,
+        isAdmin,
+        isLoading,
+        signIn,
+        signUp,
+        signOut,
+        switchDemoRole,
+        updateProfile,
+        refreshProfileFromCloud,
+        refetchUserData,
+      }}
+    >
       {children}
     </AuthContext.Provider>
   );

@@ -37,6 +37,11 @@ import {
   syncSessionsFromSupabase,
   syncBookClubThreadsFromSupabase,
   syncMemberGoalsFromSupabase,
+  fetchAllProfilesFromSupabase,
+  forceCloudSyncAll,
+  getCloudSyncStatus,
+  subscribeToCloudSyncStatus,
+  CloudSyncStatus,
   persistBookToSupabase,
   persistDiscussionToSupabase,
   persistCommentToSupabase,
@@ -54,6 +59,8 @@ import { deduceDarkArchetype, getCoverUrl } from './services/openLibrary';
 function AppContent() {
   const { user, isAdmin } = useAuth();
   const [activeTab, setActiveTab] = useState<'library' | 'explore' | 'discussions' | 'book_club' | 'admin'>('library');
+  const [cloudSyncStatus, setCloudSyncStatus] = useState<CloudSyncStatus>(getCloudSyncStatus());
+  const [isForceSyncing, setIsForceSyncing] = useState(false);
 
   // Supabase State
   const [configState, setConfigState] = useState<SupabaseConfigState>({
@@ -78,6 +85,37 @@ function AppContent() {
   const [selectedBook, setSelectedBook] = useState<DarkBook | null>(null);
   const [sessionTargetBook, setSessionTargetBook] = useState<DarkBook | null>(null);
   const [bookClubTargetBook, setBookClubTargetBook] = useState<DarkBook | null>(null);
+
+  // Subscribe to Cloud Sync status updates and auth re-sync events
+  useEffect(() => {
+    const unsub = subscribeToCloudSyncStatus(setCloudSyncStatus);
+
+    const handleAuthSyncEvent = async () => {
+      try {
+        const [remoteBooks, remoteDiscussions, remoteSessions, remoteThreads, remoteGoals] = await Promise.all([
+          syncBooksFromSupabase(),
+          syncDiscussionsFromSupabase(),
+          syncSessionsFromSupabase(),
+          syncBookClubThreadsFromSupabase(),
+          syncMemberGoalsFromSupabase(),
+        ]);
+        setBooks(remoteBooks);
+        setDiscussions(remoteDiscussions);
+        setSessions(remoteSessions);
+        setBookClubThreads(remoteThreads);
+        setMemberGoals(remoteGoals);
+      } catch (err) {
+        console.warn('[App] Auth sync handler note:', err);
+      }
+    };
+
+    window.addEventListener('books-and-friends:auth-sync', handleAuthSyncEvent);
+
+    return () => {
+      unsub();
+      window.removeEventListener('books-and-friends:auth-sync', handleAuthSyncEvent);
+    };
+  }, []);
 
   // Initialize and validate Supabase connection on launch with background syncing
   useEffect(() => {
@@ -107,6 +145,7 @@ function AppContent() {
             syncSessionsFromSupabase(),
             syncBookClubThreadsFromSupabase(),
             syncMemberGoalsFromSupabase(),
+            fetchAllProfilesFromSupabase(),
           ]);
           setBooks(remoteBooks);
           setDiscussions(remoteDiscussions);
@@ -141,12 +180,31 @@ function AppContent() {
         syncSessionsFromSupabase(),
         syncBookClubThreadsFromSupabase(),
         syncMemberGoalsFromSupabase(),
+        fetchAllProfilesFromSupabase(),
       ]);
       setBooks(remoteBooks);
       setDiscussions(remoteDiscussions);
       setSessions(remoteSessions);
       setBookClubThreads(remoteThreads);
       setMemberGoals(remoteGoals);
+    }
+  };
+
+  const handleForceCloudSync = async () => {
+    setIsForceSyncing(true);
+    try {
+      const res = await forceCloudSyncAll();
+      setBooks(res.books);
+      setDiscussions(res.discussions);
+      setSessions(res.sessions);
+      setBookClubThreads(res.threads);
+      setMemberGoals(res.goals);
+      const validated = await validateSupabaseConnection();
+      setConfigState(validated);
+    } catch (err) {
+      console.warn('[App] Force cloud sync error:', err);
+    } finally {
+      setIsForceSyncing(false);
     }
   };
 
@@ -596,6 +654,9 @@ function AppContent() {
         onConfigUpdated={(state) => setConfigState(state)}
         sessionsCount={sessions.length}
         discussionsCount={discussions.length + bookClubThreads.length}
+        cloudSyncStatus={cloudSyncStatus}
+        isForceSyncing={isForceSyncing}
+        onForceCloudSync={handleForceCloudSync}
       />
 
       {/* Main Viewport Container */}

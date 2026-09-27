@@ -32,15 +32,17 @@ export const LoginPage: React.FC = () => {
         const res = await signUp(email, password, name);
         if (!res.success) {
           setError(res.error || 'Registration failed. Please check your credentials.');
+        } else if (res.isExistingUser) {
+          setSuccessNotice('Existing account found. Connected to your central cloud profile & synchronized across devices!');
         } else {
-          setSuccessNotice('Account created successfully! Loading your personal sanctuary...');
+          setSuccessNotice('Account created successfully! Synchronized to cloud database...');
         }
       } else {
         const res = await signIn(email, password);
         if (!res.success) {
           setError(res.error || 'Invalid email or password.');
         } else {
-          setSuccessNotice('Signed in successfully! Entering sanctuary...');
+          setSuccessNotice('Signed in successfully! Cloud profile synchronized...');
         }
       }
     } catch (err: any) {

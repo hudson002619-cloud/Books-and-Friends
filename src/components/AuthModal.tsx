@@ -58,6 +58,11 @@ export const AuthModal: React.FC<AuthModalProps> = ({
         const res = await signUp(email, password, name);
         if (!res.success) {
           setError(res.error || 'Registration failed.');
+        } else if (res.isExistingUser) {
+          setSuccessMsg('Existing account found in cloud database. Re-connected to your original profile!');
+          setTimeout(() => {
+            onClose();
+          }, 700);
         } else {
           setSuccessMsg('Account registered successfully. Initiating sanctuary session...');
           setTimeout(() => {
