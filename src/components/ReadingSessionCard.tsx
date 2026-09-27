@@ -18,6 +18,7 @@ import {
   MessageSquare,
   CheckCircle2,
   Clock,
+  Trash2,
 } from 'lucide-react';
 
 interface ReadingSessionCardProps {
@@ -25,6 +26,7 @@ interface ReadingSessionCardProps {
   onToggleJoinSession: (sessionId: string) => void;
   onUpdateChapter?: (sessionId: string, newChapter: number) => void;
   onAddMilestone?: (sessionId: string, milestone: SessionMilestone) => void;
+  onDeleteSession?: (sessionId: string) => void;
   onOpenDirectBook?: (url: string) => void;
 }
 
@@ -33,6 +35,7 @@ export const ReadingSessionCard: React.FC<ReadingSessionCardProps> = ({
   onToggleJoinSession,
   onUpdateChapter,
   onAddMilestone,
+  onDeleteSession,
   onOpenDirectBook,
 }) => {
   const { user, isAdmin } = useAuth();
@@ -297,6 +300,22 @@ export const ReadingSessionCard: React.FC<ReadingSessionCardProps> = ({
               <ExternalLink className="w-3.5 h-3.5 text-amber-400" />
               <span>Read on Open Library</span>
             </a>
+          )}
+
+          {/* Host / Admin Delete Session Button */}
+          {isHostOrAdmin && onDeleteSession && (
+            <button
+              type="button"
+              onClick={() => {
+                if (window.confirm(`Are you sure you want to delete session for "${session.bookTitle}"?`)) {
+                  onDeleteSession(session.id);
+                }
+              }}
+              className="p-1.5 text-zinc-500 hover:text-red-400 hover:bg-red-950/40 border border-transparent hover:border-red-900/50 rounded-lg transition-all cursor-pointer"
+              title="Delete reading session"
+            >
+              <Trash2 className="w-3.5 h-3.5" />
+            </button>
           )}
 
           <button

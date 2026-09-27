@@ -16,6 +16,7 @@ import {
   Layers,
   Save,
   Trash2,
+  LogOut,
 } from 'lucide-react';
 
 interface UserProfileModalProps {
@@ -46,7 +47,7 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
   sessionsHostedCount = 2,
   discussionsCount = 3,
 }) => {
-  const { user, updateProfile, isAdmin } = useAuth();
+  const { user, updateProfile, isAdmin, signOut } = useAuth();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [name, setName] = useState(user?.name || '');
@@ -412,31 +413,46 @@ export const UserProfileModal: React.FC<UserProfileModalProps> = ({
           </div>
 
           {/* Actions */}
-          <div className="pt-3 border-t border-white/5 flex items-center justify-end gap-2.5 shrink-0">
+          <div className="pt-3 border-t border-white/5 flex items-center justify-between gap-2.5 shrink-0 flex-wrap">
             <button
               type="button"
-              onClick={onClose}
-              className="px-4 py-2 text-xs text-zinc-400 hover:text-zinc-200 bg-white/5 hover:bg-white/10 rounded-xl transition-colors cursor-pointer"
+              onClick={() => {
+                onClose();
+                signOut();
+              }}
+              className="px-3.5 py-2 text-xs text-red-300 hover:text-red-100 bg-red-950/50 hover:bg-red-900/80 border border-red-900/60 rounded-xl transition-colors flex items-center gap-1.5 cursor-pointer"
+              title="Terminate active session and return to login"
             >
-              Cancel
+              <LogOut className="w-3.5 h-3.5 text-red-400" />
+              <span>Log Out</span>
             </button>
-            <button
-              type="submit"
-              disabled={isSaving || !name.trim()}
-              className="px-5 py-2 text-xs font-semibold text-white bg-red-950 hover:bg-red-900 border border-red-800/60 rounded-xl shadow-lg transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
-            >
-              {isSaving ? (
-                <>
-                  <span className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
-                  <span>Persisting Profile...</span>
-                </>
-              ) : (
-                <>
-                  <Save className="w-3.5 h-3.5" />
-                  <span>Save Scholar Profile</span>
-                </>
-              )}
-            </button>
+
+            <div className="flex items-center gap-2">
+              <button
+                type="button"
+                onClick={onClose}
+                className="px-4 py-2 text-xs text-zinc-400 hover:text-zinc-200 bg-white/5 hover:bg-white/10 rounded-xl transition-colors cursor-pointer"
+              >
+                Cancel
+              </button>
+              <button
+                type="submit"
+                disabled={isSaving || !name.trim()}
+                className="px-5 py-2 text-xs font-semibold text-white bg-red-950 hover:bg-red-900 border border-red-800/60 rounded-xl shadow-lg transition-all flex items-center gap-1.5 disabled:opacity-50 cursor-pointer"
+              >
+                {isSaving ? (
+                  <>
+                    <span className="w-3.5 h-3.5 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+                    <span>Persisting Profile...</span>
+                  </>
+                ) : (
+                  <>
+                    <Save className="w-3.5 h-3.5" />
+                    <span>Save Scholar Profile</span>
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </form>
       </div>

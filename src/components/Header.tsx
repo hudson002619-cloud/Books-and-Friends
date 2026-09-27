@@ -157,11 +157,12 @@ export const Header: React.FC<HeaderProps> = ({
 
               <button
                 onClick={signOut}
-                className="p-1.5 text-zinc-400 hover:text-zinc-200 transition-colors rounded-lg hover:bg-white/5 cursor-pointer"
-                title="Sign Out"
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold text-zinc-300 hover:text-white bg-white/5 hover:bg-red-950/70 border border-white/10 hover:border-red-800/60 rounded-xl transition-all cursor-pointer shadow-sm group"
+                title="Sign out of Books and Friends"
                 aria-label="Sign out"
               >
-                <LogOut className="w-4 h-4" />
+                <LogOut className="w-3.5 h-3.5 text-zinc-400 group-hover:text-red-400 transition-colors" />
+                <span className="hidden sm:inline">Log Out</span>
               </button>
             </div>
           ) : (

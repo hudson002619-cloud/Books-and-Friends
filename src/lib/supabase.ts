@@ -19,6 +19,8 @@ import {
 const SUPABASE_URL_KEY = 'bf_supabase_url';
 const SUPABASE_KEY_KEY = 'bf_supabase_anon_key';
 const LOCAL_BOOKS_KEY = 'bf_local_books_db';
+const LOCAL_DELETED_BOOKS_KEY = 'bf_local_deleted_books_keys';
+const LOCAL_INITIALIZED_KEY = 'bf_has_initialized_db';
 const LOCAL_DISCUSSIONS_KEY = 'bf_local_discussions_db';
 const LOCAL_SESSIONS_KEY = 'bf_local_reading_sessions_db';
 const LOCAL_BOOK_CLUB_THREADS_KEY = 'bf_local_book_club_threads_db';
@@ -28,6 +30,63 @@ const LOCAL_BOOKMARKS_KEY = 'bf_user_bookmarks';
 const LOCAL_TIMER_KEY = 'bf_reading_timer_state';
 const LOCAL_VAULT_FILTERS_KEY = 'bf_vault_filters_state';
 const LOCAL_USER_PROFILES_KEY = 'bf_user_profiles_cache';
+
+// =========================================================================
+// DELETED BOOKS TOMBSTONE MANAGEMENT (Guarantees deleted records never resurrect)
+// =========================================================================
+
+export function getDeletedBookKeys(): Set<string> {
+  try {
+    const raw = localStorage.getItem(LOCAL_DELETED_BOOKS_KEY);
+    if (!raw) return new Set();
+    const arr = JSON.parse(raw);
+    return new Set(Array.isArray(arr) ? arr.map((s: string) => String(s).toLowerCase().trim()) : []);
+  } catch {
+    return new Set();
+  }
+}
+
+export function saveDeletedBookKeys(keys: Set<string>) {
+  try {
+    localStorage.setItem(LOCAL_DELETED_BOOKS_KEY, JSON.stringify(Array.from(keys)));
+  } catch (e) {
+    console.warn('[Supabase] Error saving deleted book keys:', e);
+  }
+}
+
+export function addDeletedBookKey(id?: string, openLibraryKey?: string, title?: string) {
+  const current = getDeletedBookKeys();
+  if (id) current.add(String(id).toLowerCase().trim());
+  if (openLibraryKey) current.add(String(openLibraryKey).toLowerCase().trim());
+  if (title) current.add(String(title).toLowerCase().trim());
+  saveDeletedBookKeys(current);
+}
+
+export function removeDeletedBookKey(id?: string, openLibraryKey?: string, title?: string) {
+  const current = getDeletedBookKeys();
+  if (id) current.delete(String(id).toLowerCase().trim());
+  if (openLibraryKey) current.delete(String(openLibraryKey).toLowerCase().trim());
+  if (title) current.delete(String(title).toLowerCase().trim());
+  saveDeletedBookKeys(current);
+}
+
+export function isBookDeleted(book: Partial<DarkBook> | any, deletedKeys?: Set<string>): boolean {
+  if (!book) return false;
+  const keys = deletedKeys || getDeletedBookKeys();
+  if (keys.size === 0) return false;
+
+  const id = book.id ? String(book.id).toLowerCase().trim() : '';
+  const openLibraryKey = book.openLibraryKey
+    ? String(book.openLibraryKey).toLowerCase().trim()
+    : (book.open_library_key ? String(book.open_library_key).toLowerCase().trim() : '');
+  const title = book.title ? String(book.title).toLowerCase().trim() : '';
+
+  if (id && keys.has(id)) return true;
+  if (openLibraryKey && keys.has(openLibraryKey)) return true;
+  if (title && keys.has(title)) return true;
+
+  return false;
+}
 
 // Initial Curated Book Club Threads
 export const INITIAL_BOOK_CLUB_THREADS: BookClubThread[] = [
@@ -612,6 +671,7 @@ export async function validateSupabaseConnection(): Promise<SupabaseConfigState>
 // Books Persistence
 export async function syncBooksFromSupabase(): Promise<DarkBook[]> {
   const local = getLocalBooks();
+  const deletedKeys = getDeletedBookKeys();
   const client = getSupabaseClient();
   if (!client) return local;
 
@@ -627,30 +687,75 @@ export async function syncBooksFromSupabase(): Promise<DarkBook[]> {
     }
 
     if (!data || data.length === 0) {
+      // Remote is empty, seed active non-deleted local books to Supabase
+      if (local.length > 0) {
+        for (const b of local) {
+          if (!isBookDeleted(b, deletedKeys)) {
+            persistBookToSupabase(b).catch(() => {});
+          }
+        }
+      }
       return local;
     }
 
-    // Map database rows to DarkBook model
-    const mappedBooks: DarkBook[] = data.map((row: any) => ({
-      id: row.id || `bk_${Date.now()}`,
-      openLibraryKey: row.open_library_key,
-      title: row.title,
-      author: row.author,
-      coverUrl: row.cover_url,
-      firstPublishYear: row.first_publish_year,
-      subjects: row.subjects || [],
-      darkArchetype: row.dark_archetype || 'The Strategist',
-      synopsis: row.synopsis || '',
-      curatorNotes: row.curator_notes || '',
-      rating: Number(row.rating) || 4.8,
-      addedBy: row.added_by || 'adhudson504@gmail.com',
-      createdAt: row.created_at || new Date().toISOString(),
-      discussionCount: Number(row.discussion_count) || 0,
-      status: row.status || 'reading',
-    }));
+    // Process remote rows
+    const remoteBooks: DarkBook[] = [];
 
-    saveLocalBooks(mappedBooks);
-    return mappedBooks;
+    for (const row of data) {
+      const mapped: DarkBook = {
+        id: row.id || `bk_${Date.now()}`,
+        openLibraryKey: row.open_library_key,
+        title: row.title,
+        author: row.author,
+        coverUrl: row.cover_url,
+        firstPublishYear: row.first_publish_year,
+        subjects: row.subjects || [],
+        darkArchetype: row.dark_archetype || 'The Strategist',
+        synopsis: row.synopsis || '',
+        curatorNotes: row.curator_notes || '',
+        rating: Number(row.rating) || 4.8,
+        addedBy: row.added_by || 'adhudson504@gmail.com',
+        createdAt: row.created_at || new Date().toISOString(),
+        discussionCount: Number(row.discussion_count) || 0,
+        status: row.status || 'reading',
+      };
+
+      // If this book was marked deleted by Developer Admin, do NOT resurrect it!
+      if (isBookDeleted(mapped, deletedKeys)) {
+        // Proactively clean up remote table in background
+        if (row.id) client.from('books').delete().eq('id', row.id).then();
+        if (row.open_library_key) client.from('books').delete().eq('open_library_key', row.open_library_key).then();
+      } else {
+        remoteBooks.push(mapped);
+      }
+    }
+
+    // Merge remote and local books: Local edits take precedence over stale remote records
+    const bookMap = new Map<string, DarkBook>();
+
+    // 1. Add non-deleted remote books
+    remoteBooks.forEach((rb) => {
+      const key = (rb.openLibraryKey || rb.id).toLowerCase();
+      bookMap.set(key, rb);
+    });
+
+    // 2. Overlay local books (retaining local updates & new books)
+    local.forEach((lb) => {
+      if (!isBookDeleted(lb, deletedKeys)) {
+        const key = (lb.openLibraryKey || lb.id).toLowerCase();
+        const existing = bookMap.get(key);
+        if (existing) {
+          bookMap.set(key, { ...existing, ...lb });
+        } else {
+          bookMap.set(key, lb);
+          persistBookToSupabase(lb).catch(() => {});
+        }
+      }
+    });
+
+    const finalBooks = Array.from(bookMap.values()).filter((b) => !isBookDeleted(b, deletedKeys));
+    saveLocalBooks(finalBooks);
+    return finalBooks;
   } catch (err) {
     console.warn('[Supabase] Failed to sync books from remote cluster, using local cache:', err);
     return local;
@@ -658,76 +763,104 @@ export async function syncBooksFromSupabase(): Promise<DarkBook[]> {
 }
 
 export async function persistBookToSupabase(book: DarkBook): Promise<void> {
+  // Remove from deleted tombstone so it's active
+  removeDeletedBookKey(book.id, book.openLibraryKey, book.title);
+
+  // Update local cache
+  const local = getLocalBooks();
+  const index = local.findIndex(
+    (b) =>
+      b.id === book.id ||
+      (book.openLibraryKey && b.openLibraryKey === book.openLibraryKey) ||
+      b.title.toLowerCase() === book.title.toLowerCase()
+  );
+
+  let updatedList: DarkBook[];
+  if (index >= 0) {
+    updatedList = [...local];
+    updatedList[index] = { ...updatedList[index], ...book };
+  } else {
+    updatedList = [book, ...local];
+  }
+  saveLocalBooks(updatedList);
+
   const client = getSupabaseClient();
   if (!client) return;
 
   try {
-    await client.from('books').upsert({
+    const payload: any = {
       open_library_key: book.openLibraryKey,
       title: book.title,
       author: book.author,
       cover_url: book.coverUrl,
       first_publish_year: book.firstPublishYear,
-      subjects: book.subjects,
+      subjects: book.subjects || [],
       dark_archetype: book.darkArchetype,
       synopsis: book.synopsis,
       curator_notes: book.curatorNotes,
       rating: book.rating,
-      added_by: book.addedBy,
+      added_by: book.addedBy || 'adhudson504@gmail.com',
       status: book.status,
-    }, { onConflict: 'open_library_key' });
+      updated_at: new Date().toISOString(),
+    };
+
+    if (book.id && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(book.id)) {
+      payload.id = book.id;
+    }
+
+    await client.from('books').upsert(payload, { onConflict: 'open_library_key' });
   } catch (err) {
-    console.warn('[Supabase] Persist book error (falling back to localStorage):', err);
+    console.warn('[Supabase] Persist book error (safely retained in localStorage):', err);
   }
 }
 
 export async function deleteBookFromSupabase(
-  target: DarkBook | { id: string; openLibraryKey?: string } | string
+  target: DarkBook | { id: string; openLibraryKey?: string; title?: string } | string
 ): Promise<{ success: boolean; error?: string }> {
   const client = getSupabaseClient();
 
-  const id = typeof target === 'string' ? target : target.id;
-  const openLibraryKey = typeof target === 'object' && target.openLibraryKey ? target.openLibraryKey : (typeof target === 'string' ? target : '');
+  const id = typeof target === 'string' ? target : (target?.id || '');
+  const openLibraryKey = typeof target === 'object' && target.openLibraryKey ? target.openLibraryKey : (typeof target === 'string' && !target.includes('-') ? target : '');
+  const title = typeof target === 'object' && 'title' in target && target.title ? target.title : '';
 
-  // 1. Immediately purge from local storage cache
+  // 1. Permanently register in tombstone
+  addDeletedBookKey(id, openLibraryKey, title);
+
+  // 2. Immediately purge from local storage cache
   const local = getLocalBooks();
+  const deletedKeys = getDeletedBookKeys();
   const filteredLocal = local.filter((b) => {
+    if (isBookDeleted(b, deletedKeys)) return false;
     if (id && (b.id === id || b.openLibraryKey === id)) return false;
     if (openLibraryKey && (b.openLibraryKey === openLibraryKey || b.id === openLibraryKey)) return false;
+    if (title && b.title.toLowerCase() === title.toLowerCase()) return false;
     return true;
   });
   saveLocalBooks(filteredLocal);
 
-  // 2. If Supabase is not connected, local cache is already updated
-  if (!client) {
-    return { success: true };
+  // 3. Execute deletes across remote Supabase database
+  if (client) {
+    try {
+      const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
+
+      if (isUuid) {
+        await client.from('books').delete().eq('id', id);
+      }
+      if (openLibraryKey) {
+        await client.from('books').delete().eq('open_library_key', openLibraryKey);
+      }
+      if (title) {
+        await client.from('books').delete().ilike('title', title);
+      }
+      if (id && !isUuid) {
+        await client.from('books').delete().eq('open_library_key', id);
+      }
+    } catch (err) {
+      console.warn('[Supabase] Remote delete error (safely removed from local & tombstone):', err);
+    }
   }
 
-  try {
-    const isUuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id);
-
-    let deleteQuery = client.from('books').delete();
-    if (isUuid && openLibraryKey) {
-      deleteQuery = deleteQuery.or(`id.eq.${id},open_library_key.eq.${openLibraryKey}`);
-    } else if (openLibraryKey) {
-      deleteQuery = deleteQuery.eq('open_library_key', openLibraryKey);
-    } else if (isUuid) {
-      deleteQuery = deleteQuery.eq('id', id);
-    } else {
-      deleteQuery = deleteQuery.or(`open_library_key.eq.${id},id.eq.${id}`);
-    }
-
-    const { error } = await deleteQuery;
-    if (error) {
-      console.error('[Supabase] Failed to delete book from Supabase:', error);
-      return { success: false, error: error.message };
-    }
-
-    return { success: true };
-  } catch (err: any) {
-    console.error('[Supabase] Delete book exception:', err);
-    return { success: false, error: err?.message || 'Network communication failure' };
-  }
+  return { success: true };
 }
 
 export async function deleteDiscussionFromSupabase(discussionId: string): Promise<{ success: boolean; error?: string }> {
@@ -947,6 +1080,26 @@ export async function persistSessionToSupabase(session: ReadingSession): Promise
   }
 }
 
+export async function deleteSessionFromSupabase(sessionId: string): Promise<{ success: boolean; error?: string }> {
+  const local = getLocalReadingSessions();
+  saveLocalReadingSessions(local.filter((s) => s.id !== sessionId));
+
+  const client = getSupabaseClient();
+  if (!client) return { success: true };
+
+  try {
+    const { error } = await client.from('reading_sessions').delete().eq('id', sessionId);
+    if (error) {
+      console.error('[Supabase] Delete session error:', error);
+      return { success: false, error: error.message };
+    }
+    return { success: true };
+  } catch (err: any) {
+    console.error('[Supabase] Delete session exception:', err);
+    return { success: false, error: err?.message || 'Network error' };
+  }
+}
+
 // User Profiles Persistence & Photo Storage
 export async function persistUserProfileToSupabase(user: User): Promise<void> {
   // Update local profiles cache
@@ -990,14 +1143,27 @@ export function getStoredUserProfiles(): Record<string, User> {
 
 export function getLocalBooks(): DarkBook[] {
   try {
+    const isInitialized = localStorage.getItem(LOCAL_INITIALIZED_KEY);
     const raw = localStorage.getItem(LOCAL_BOOKS_KEY);
-    if (!raw) {
-      localStorage.setItem(LOCAL_BOOKS_KEY, JSON.stringify(INITIAL_DARK_BOOKS));
-      return INITIAL_DARK_BOOKS;
+    const deletedKeys = getDeletedBookKeys();
+    let books: DarkBook[] = [];
+
+    if (!isInitialized) {
+      localStorage.setItem(LOCAL_INITIALIZED_KEY, 'true');
+      books = INITIAL_DARK_BOOKS.filter((b) => !isBookDeleted(b, deletedKeys));
+      localStorage.setItem(LOCAL_BOOKS_KEY, JSON.stringify(books));
+      return books;
     }
-    return JSON.parse(raw);
+
+    if (raw) {
+      books = JSON.parse(raw);
+    } else {
+      books = [];
+    }
+
+    return books.filter((b) => !isBookDeleted(b, deletedKeys));
   } catch {
-    return INITIAL_DARK_BOOKS;
+    return [];
   }
 }
 

@@ -37,6 +37,7 @@ interface ReadingRoomsProps {
   onToggleJoinSession: (sessionId: string) => void;
   onUpdateSessionChapter?: (sessionId: string, newChapter: number) => void;
   onAddSessionMilestone?: (sessionId: string, milestone: SessionMilestone) => void;
+  onDeleteSession?: (sessionId: string) => void;
   initialSessionBook?: DarkBook | null;
 }
 
@@ -53,6 +54,7 @@ export const ReadingRooms: React.FC<ReadingRoomsProps> = ({
   onToggleJoinSession,
   onUpdateSessionChapter,
   onAddSessionMilestone,
+  onDeleteSession,
   initialSessionBook,
 }) => {
   const { user, isAdmin } = useAuth();
@@ -267,6 +269,7 @@ export const ReadingRooms: React.FC<ReadingRoomsProps> = ({
                   onToggleJoinSession={onToggleJoinSession}
                   onUpdateChapter={onUpdateSessionChapter}
                   onAddMilestone={onAddSessionMilestone}
+                  onDeleteSession={onDeleteSession}
                 />
               ))}
             </div>

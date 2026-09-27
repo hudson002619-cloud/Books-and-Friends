@@ -23,7 +23,8 @@ import {
   Sparkles,
   Search,
   BookOpen,
-  AlertCircle
+  AlertCircle,
+  LogOut,
 } from 'lucide-react';
 
 export { SUPABASE_ADMIN_FRAMEWORK_SQL };
@@ -45,7 +46,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
   onUpdateDiscussions,
   onRefreshDatabase,
 }) => {
-  const { user, isAdmin, switchDemoRole } = useAuth();
+  const { user, isAdmin, switchDemoRole, signOut } = useAuth();
   const [activeTab, setActiveTab] = useState<'crud' | 'query' | 'sql' | 'logs'>('crud');
   const [copiedSql, setCopiedSql] = useState(false);
 
@@ -64,6 +65,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
 
   // Delete & Action Feedback State
   const [deletingBookId, setDeletingBookId] = useState<string | null>(null);
+  const [bookToDelete, setBookToDelete] = useState<DarkBook | null>(null);
   const [deleteFeedback, setDeleteFeedback] = useState<{
     type: 'success' | 'error';
     message: string;
@@ -169,12 +171,12 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     setTimeout(() => setDeleteFeedback(null), 4000);
   };
 
-  // 3. DELETE Handler (Developer Admin privilege)
-  const handleDeleteBook = async (book: DarkBook) => {
-    if (!window.confirm(`Developer Admin Clearance: Confirm permanent DELETE of record "${book.title}" from database?`)) {
-      return;
-    }
+  // 3. DELETE Handlers (Developer Admin privilege)
+  const promptDeleteBook = (book: DarkBook) => {
+    setBookToDelete(book);
+  };
 
+  const handleConfirmDelete = async (book: DarkBook) => {
     setDeletingBookId(book.id);
     if (editingBookId === book.id) {
       setEditingBookId(null);
@@ -185,7 +187,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
     onUpdateBooks(updated);
 
     try {
-      // 2. Execute Supabase DELETE API query with proper record identifier
+      // 2. Execute Supabase DELETE API query with proper record identifiers
       const res = await deleteBookFromSupabase(book);
 
       if (res.success) {
@@ -214,7 +216,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           table: 'public.books',
           performedBy: ADMIN_EMAIL,
           details: `Admin DELETE query warning for "${book.title}": ${res.error}`,
-          status: 'WARNING',
+          status: 'FAILED',
         });
       }
     } catch (err: any) {
@@ -226,6 +228,7 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
       });
     } finally {
       setDeletingBookId(null);
+      setBookToDelete(null);
       setAuditLogs(getAdminAuditLogs());
       setTimeout(() => setDeleteFeedback(null), 5000);
     }
@@ -333,13 +336,22 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
           </p>
         </div>
 
-        <div className="flex items-center gap-2 shrink-0">
+        <div className="flex items-center gap-2 shrink-0 flex-wrap">
           <button
             onClick={onRefreshDatabase}
             className="px-3.5 py-2 bg-white/5 hover:bg-white/10 border border-white/10 text-zinc-300 hover:text-white rounded-xl text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer"
           >
             <RefreshCw className="w-3.5 h-3.5 text-zinc-400" />
             <span>Sync Supabase</span>
+          </button>
+
+          <button
+            onClick={signOut}
+            className="px-3.5 py-2 bg-red-950/60 hover:bg-red-900 border border-red-800/60 text-red-200 hover:text-white rounded-xl text-xs font-medium transition-colors flex items-center gap-1.5 cursor-pointer shadow-sm"
+            title="Sign out of Developer Admin console"
+          >
+            <LogOut className="w-3.5 h-3.5 text-red-400" />
+            <span>Log Out (Admin)</span>
           </button>
         </div>
       </div>
@@ -672,10 +684,11 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                             </button>
                             <button
                               type="button"
-                              onClick={() => handleDeleteBook(book)}
+                              onClick={() => promptDeleteBook(book)}
                               disabled={isDeleting}
                               className="p-1.5 text-red-400 hover:text-red-200 bg-red-950/40 hover:bg-red-900 rounded transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                               title="Delete Record (DELETE privilege)"
+                              aria-label={`Delete record ${book.title}`}
                             >
                               {isDeleting ? (
                                 <RefreshCw className="w-3.5 h-3.5 animate-spin text-red-400" />
@@ -690,6 +703,85 @@ export const AdminPanel: React.FC<AdminPanelProps> = ({
                   );
                 })
               )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Developer Admin Delete Confirmation Modal */}
+      {bookToDelete && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/80 backdrop-blur-sm animate-fadeIn">
+          <div className="bg-[#0e0e16] border border-red-900/60 rounded-2xl max-w-md w-full p-6 space-y-5 shadow-2xl relative">
+            <div className="flex items-start gap-3.5">
+              <div className="p-2.5 rounded-xl bg-red-950/60 border border-red-800/80 text-red-400 shrink-0">
+                <Trash2 className="w-6 h-6" />
+              </div>
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] font-mono text-red-400 uppercase tracking-wider font-semibold">
+                    Developer Admin Clearance
+                  </span>
+                  <span className="text-zinc-600">·</span>
+                  <span className="text-[10px] text-zinc-400 font-mono">public.books</span>
+                </div>
+                <h3 className="text-base font-bold text-zinc-100 font-display">
+                  Confirm Permanent Record Deletion
+                </h3>
+              </div>
+            </div>
+
+            {/* Target Record Card */}
+            <div className="p-3.5 rounded-xl bg-[#141420] border border-white/10 flex items-center gap-3.5 text-xs">
+              <img
+                src={bookToDelete.coverUrl}
+                alt={bookToDelete.title}
+                className="w-12 h-16 object-cover rounded bg-black border border-white/10 shrink-0 shadow"
+                referrerPolicy="no-referrer"
+              />
+              <div className="min-w-0 space-y-1">
+                <div className="font-semibold text-zinc-100 truncate font-display text-sm">
+                  {bookToDelete.title}
+                </div>
+                <div className="text-zinc-400 text-xs truncate">
+                  {bookToDelete.author} · <span className="text-amber-400">{bookToDelete.darkArchetype}</span>
+                </div>
+                <div className="text-[10px] text-zinc-500 font-mono truncate">
+                  Key: {bookToDelete.openLibraryKey} · ID: {bookToDelete.id}
+                </div>
+              </div>
+            </div>
+
+            <p className="text-xs text-zinc-400 leading-relaxed">
+              This will execute a Supabase <code className="text-red-300 font-mono font-semibold">DELETE</code> query and permanently purge this catalog record from the database and live dashboard across all views.
+            </p>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setBookToDelete(null)}
+                disabled={deletingBookId === bookToDelete.id}
+                className="px-4 py-2 text-xs font-medium text-zinc-300 hover:text-white bg-white/5 hover:bg-white/10 border border-white/10 rounded-xl transition-colors cursor-pointer disabled:opacity-50"
+              >
+                Cancel
+              </button>
+              <button
+                type="button"
+                onClick={() => handleConfirmDelete(bookToDelete)}
+                disabled={deletingBookId === bookToDelete.id}
+                className="px-4 py-2 text-xs font-semibold text-white bg-red-900 hover:bg-red-800 border border-red-700/80 rounded-xl transition-colors flex items-center gap-2 cursor-pointer shadow-lg disabled:opacity-50"
+              >
+                {deletingBookId === bookToDelete.id ? (
+                  <>
+                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
+                    <span>Purging from Database...</span>
+                  </>
+                ) : (
+                  <>
+                    <Trash2 className="w-3.5 h-3.5" />
+                    <span>Execute Permanent DELETE</span>
+                  </>
+                )}
+              </button>
             </div>
           </div>
         </div>

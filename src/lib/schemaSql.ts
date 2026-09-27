@@ -242,12 +242,13 @@ ALTER TABLE public.club_member_reactions ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.member_goals ENABLE ROW LEVEL SECURITY;
 ALTER TABLE public.audit_logs ENABLE ROW LEVEL SECURITY;
 
--- 15. Helper Function: Is Developer Admin Verification
+-- 15. Helper Function: Is Developer Admin Verification (Strict Security Boundary)
 CREATE OR REPLACE FUNCTION public.is_developer_admin()
 RETURNS BOOLEAN AS $$
 BEGIN
     RETURN (
         (auth.jwt() ->> 'email') = 'adhudson504@gmail.com'
+        OR current_setting('request.jwt.claims', true)::json->>'email' = 'adhudson504@gmail.com'
         OR EXISTS (
             SELECT 1 FROM public.profiles
             WHERE profiles.id = auth.uid()

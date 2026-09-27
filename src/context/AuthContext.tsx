@@ -1,6 +1,6 @@
 import React, { createContext, useContext, useState, useEffect } from 'react';
 import { User, UserRole } from '../types';
-import { recordAuditLog, persistUserProfileToSupabase } from '../lib/supabase';
+import { recordAuditLog, persistUserProfileToSupabase, getStoredUserProfiles } from '../lib/supabase';
 
 export const ADMIN_EMAIL = 'adhudson504@gmail.com';
 export const ADMIN_PASSWORD = 'mYZuMr4W1hjEqE0q';
@@ -69,11 +69,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         }
         setUser(parsed);
       } else {
-        // Initial default session: Developer Admin for instant evaluation
-        setUser(SEED_USERS.admin);
+        // Initial visitor state: No active session (Must login/signup first)
+        setUser(null);
       }
     } catch {
-      setUser(SEED_USERS.admin);
+      setUser(null);
     } finally {
       setIsLoading(false);
     }
@@ -97,6 +97,8 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
 
     let authenticatedUser: User;
+    const storedProfiles = getStoredUserProfiles();
+    const existingProfile = storedProfiles[cleanEmail];
 
     // Strict Developer Admin Security Enforcement
     if (cleanEmail === ADMIN_EMAIL.toLowerCase()) {
@@ -109,6 +111,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
       authenticatedUser = {
         ...SEED_USERS.admin,
+        ...(existingProfile || {}),
         email: ADMIN_EMAIL,
         role: 'admin',
       };
@@ -126,7 +129,11 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         return { success: false, error: 'Password must be at least 6 characters long.' };
       }
 
-      authenticatedUser = {
+      authenticatedUser = existingProfile ? {
+        ...existingProfile,
+        email: cleanEmail,
+        role: 'member',
+      } : {
         id: `usr_${Date.now()}`,
         email: cleanEmail,
         name: cleanEmail.split('@')[0].replace(/[._]/g, ' ').replace(/\b\w/g, (l) => l.toUpperCase()),
@@ -147,6 +154,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     setUser(authenticatedUser);
     localStorage.setItem(AUTH_STORAGE_KEY, JSON.stringify(authenticatedUser));
+    await persistUserProfileToSupabase(authenticatedUser);
     return { success: true };
   };
 

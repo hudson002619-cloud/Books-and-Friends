@@ -7,6 +7,7 @@ import { ReadingRooms } from './components/ReadingRooms';
 import { BookClub } from './components/BookClub';
 import { AdminPanel } from './components/AdminPanel';
 import { BookDetailModal } from './components/BookDetailModal';
+import { LoginPage } from './components/LoginPage';
 import {
   DarkBook,
   BookDiscussion,
@@ -44,6 +45,7 @@ import {
   persistBookClubCommentToSupabase,
   deleteBookClubThreadFromSupabase,
   deleteDiscussionFromSupabase,
+  deleteSessionFromSupabase,
   persistMemberGoalToSupabase,
   recordAuditLog,
 } from './lib/supabase';
@@ -259,11 +261,10 @@ function AppContent() {
       return;
     }
 
-    if (!window.confirm(`Confirm removal of thesis "${target.title}"?`)) return;
-
     const updated = discussions.filter((d) => d.id !== discussionId);
     setDiscussions(updated);
     saveLocalDiscussions(updated);
+    deleteDiscussionFromSupabase(discussionId);
 
     recordAuditLog({
       action: 'DELETE',
@@ -350,8 +351,6 @@ function AppContent() {
     if (!isAdmin && user?.email?.toLowerCase() !== target.authorEmail.toLowerCase()) {
       return;
     }
-
-    if (!window.confirm(`Confirm removal of reflection "${target.title}"?`)) return;
 
     const updated = bookClubThreads.filter((t) => t.id !== threadId);
     setBookClubThreads(updated);
@@ -490,6 +489,28 @@ function AppContent() {
     saveLocalReadingSessions(updated);
   };
 
+  const handleDeleteSession = (sessionId: string) => {
+    const target = sessions.find((s) => s.id === sessionId);
+    if (!target) return;
+
+    if (!isAdmin && user?.email?.toLowerCase() !== target.hostEmail?.toLowerCase()) {
+      return;
+    }
+
+    const updated = sessions.filter((s) => s.id !== sessionId);
+    setSessions(updated);
+    saveLocalReadingSessions(updated);
+    deleteSessionFromSupabase(sessionId);
+
+    recordAuditLog({
+      action: 'DELETE',
+      table: 'public.reading_sessions',
+      performedBy: user?.email || 'guest',
+      details: `Removed cohort reading session "${target.bookTitle}" (Code: ${target.inviteCode})`,
+      status: 'SUCCESS',
+    });
+  };
+
   const handleInspectOpenLibraryDoc = (doc: OpenLibraryDoc) => {
     const author = doc.author_name?.[0] || 'Unknown Philosopher';
     const archetype = deduceDarkArchetype(doc.title, doc.subject);
@@ -559,6 +580,11 @@ function AppContent() {
 
   const existingBookKeys = new Set(books.map((b) => b.openLibraryKey));
 
+  // If visitor is not authenticated, strictly show the Login/Signup View first
+  if (!user) {
+    return <LoginPage />;
+  }
+
   return (
     <div className="h-[100dvh] flex flex-col bg-[#070709] text-[#e2e2e8] overflow-hidden">
       {/* Top Bar (3-Zone Contract) */}
@@ -606,6 +632,7 @@ function AppContent() {
               onToggleJoinSession={handleToggleJoinSession}
               onUpdateSessionChapter={handleUpdateSessionChapter}
               onAddSessionMilestone={handleAddSessionMilestone}
+              onDeleteSession={handleDeleteSession}
               initialSessionBook={sessionTargetBook}
             />
           )}
